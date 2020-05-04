@@ -44,7 +44,7 @@ func (player *Player) SetupEvents() {
 	Nerr(err)
 
 	popt := poptObj.(*gtk.PopoverMenu)
-
+	player.SeekBusy = false
 	player.MpvArea.Connect("event", func(da *gtk.DrawingArea, event *gdk.Event) {
 		if gdk.EventKeyNewFromEvent(event).Type() == 3 { // Cursor move
 
@@ -154,7 +154,6 @@ func (player *Player) SetupControls() {
 
 	// Window keybinds
 	player.Win.Connect("key-press-event", func(win *gtk.Window, ev *gdk.Event) {
-		fmt.Println("keypress")
 		event := gdk.EventKeyNewFromEvent(ev)
 		switch event.KeyVal() {
 		case gdk.KEY_space:
@@ -262,7 +261,6 @@ func (player *Player) SetupControls() {
 	player.Win.DragDestSet(gtk.DEST_DEFAULT_DROP, []gtk.TargetEntry{*et}, gdk.ACTION_DEFAULT)
 
 	player.Win.Connect("drag-data-received", func(window *gtk.Window, ctn *gdk.DragContext, x int, y int, data *gtk.SelectionData, info uint, time uint) {
-		fmt.Println("ss")
 	})
 
 	// Label
@@ -300,24 +298,22 @@ func (player *Player) SetupControls() {
 
 				tp, err := player.Conn.Get("time-pos")
 				if err != nil { // not playing
-					fmt.Println("ll")
-
 					tp = 0
+					player.MpvArea.Hide()
+					player.Win.Unfullscreen()
 				} else {
-					minutes := strconv.Itoa(int(tp.(float64)) / 60)
-					seconds := strconv.Itoa(int(tp.(float64)) % 60)
-					if len(minutes) == 1 {
-						minutes = "0" + minutes
-					}
-					if len(seconds) == 1 {
-						seconds = "0" + seconds
-					}
+					minutes, seconds := ParseTime(tp.(float64))
+
 					parsedNow := minutes + ":" + seconds
 					glib.IdleAdd(func(value string) {
-						current.SetText(value)
-					}, parsedNow+"/"+player.Current.LengthParsed)
+						if !player.SeekBusy {
+							current.SetText(value)
+						}
+					}, parsedNow+" / "+player.Current.LengthParsed)
 					glib.IdleAdd(func(value float64) {
-						progress.SetValue(value * 100)
+						if !player.SeekBusy {
+							progress.SetValue(value * 100)
+						}
 					}, (tp.(float64) / player.Current.Duration))
 				}
 			}
@@ -328,12 +324,26 @@ func (player *Player) SetupControls() {
 	Nerr(err)
 
 	scale := scaleObj.(*gtk.Scale)
+
 	scale.Connect("change-value", func(grange *gtk.Scale, sc interface{}, newv float64) {
 		if newv >= 0 && newv <= 100 {
-			player.Conn.Call("seek", newv, "absolute-percent", "exact")
-			fmt.Println(newv)
-		}
+			c := (newv / 100) * player.Current.Duration
+			minutes, seconds := ParseTime(c)
 
+			current.SetText(minutes + ":" + seconds)
+		}
+	})
+
+	scale.Connect("button-press-event", func() {
+		player.SeekBusy = true
+	})
+
+	scale.Connect("button-release-event", func() {
+		newValue := scale.GetValue()
+		player.SeekBusy = false
+		if newValue >= 0 && newValue <= 100 {
+			player.Conn.Call("seek", newValue, "absolute-percent", "exact")
+		}
 	})
 
 	// FULLSCREEN
@@ -381,24 +391,27 @@ func (player *Player) SetupTracks() {
 	prevSub = radion
 
 	for _, v := range utracks {
+		btn, err := gtk.ButtonNew()
+		Nerr(err)
+
+		trackLang, ok := v.Track["lang"].(string)
+		if !ok {
+			trackLang = "unknown"
+		}
+
+		trackTitle, ok := v.Track["title"].(string)
+		if !ok {
+			trackTitle = ""
+		}
+		trackId := v.Track["id"]
+
 		if v.Type == "sub" {
-			btn, err := gtk.ButtonNew()
-			Nerr(err)
-
-			trackLang, ok := v.Track["lang"].(string)
-			if !ok {
-				trackLang = "unknown"
-			}
-
-			trackTitle, ok := v.Track["title"].(string)
-			if !ok {
-				trackTitle = ""
-			}
-			trackId := v.Track["id"]
-			radio, err := gtk.RadioButtonNewWithLabelFromWidget(prevSub, fmt.Sprintf("%v. %v (%v)", trackId, trackTitle, trackLang))
+			radio, _ := gtk.RadioButtonNewWithLabelFromWidget(prevSub, fmt.Sprintf("%v. %v (%v)", trackId, trackTitle, trackLang))
 			btn.Add(radio)
 			if v.Track["selected"].(bool) {
 				radio.SetActive(true)
+			} else {
+				radio.SetActive(false)
 			}
 
 			btn.Connect("clicked", func() {
@@ -406,33 +419,27 @@ func (player *Player) SetupTracks() {
 				radio.SetActive(true)
 			})
 
+			prevSub = radio
+
 			subs.Add(btn)
 			btn.ShowAll()
+
 		} else if v.Type == "audio" {
-			btn, err := gtk.ButtonNew()
-			Nerr(err)
+			radio, _ := gtk.RadioButtonNewWithLabelFromWidget(prevAudio, fmt.Sprintf("%v. %v (%v)", trackId, trackTitle, trackLang))
 
-			trackLang, ok := v.Track["lang"].(string)
-			if !ok {
-				trackLang = "unknown"
-			}
-
-			trackTitle, ok := v.Track["title"].(string)
-			if !ok {
-				trackTitle = ""
-			}
-			trackId := v.Track["id"]
-			radio, err := gtk.RadioButtonNewWithLabelFromWidget(prevAudio, fmt.Sprintf("%v. %v (%v)", trackId, trackTitle, trackLang))
 			btn.Add(radio)
 			if v.Track["selected"].(bool) {
 				radio.SetActive(true)
+			} else {
+				radio.SetActive(false)
 			}
 
 			btn.Connect("clicked", func() {
-				fmt.Println("check", trackId)
 				player.Conn.Set("aid", trackId)
 				radio.SetActive(true)
 			})
+
+			prevAudio = radio
 
 			audio.Add(btn)
 			btn.ShowAll()
@@ -447,7 +454,6 @@ func (player *Player) clearBox(id string) {
 	boxx := box.(*gtk.Box)
 	children := boxx.GetChildren()
 	children.Foreach(func(item interface{}) {
-		fmt.Println("child")
 		v := item.(*gtk.Widget)
 		name, err := v.GetName()
 		if err == nil {
@@ -501,4 +507,17 @@ func (player *Player) getImage(id string) *gtk.Image {
 	img := object.(*gtk.Image)
 
 	return img
+}
+
+func ParseTime(tp float64) (string, string) {
+	minutes := strconv.Itoa(int(tp) / 60)
+	seconds := strconv.Itoa(int(tp) % 60)
+	if len(minutes) == 1 {
+		minutes = "0" + minutes
+	}
+	if len(seconds) == 1 {
+		seconds = "0" + seconds
+	}
+
+	return minutes, seconds
 }

@@ -22,6 +22,7 @@ type Player struct {
 	Current  Media
 	Timer    *time.Timer
 	Mpv      *exec.Cmd
+	SeekBusy bool
 }
 
 type Media struct {
